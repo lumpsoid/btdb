@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-type BluetoothDevice struct {
+type Bluetooth struct {
 	Mac   string
 	Ltk   string
 	Irk   string
@@ -19,8 +19,8 @@ func New(
 	irk []byte,
 	erand uint64,
 	ediv uint64,
-) BluetoothDevice {
-	return BluetoothDevice{
+) Bluetooth {
+	return Bluetooth{
 		Mac:   mac,
 		Ltk:   hex.EncodeToString(ltk),
 		Irk:   hex.EncodeToString(irk),
@@ -30,7 +30,7 @@ func New(
 
 }
 
-func (d BluetoothDevice) String() string {
+func (d Bluetooth) String() string {
 	return fmt.Sprintf(
 		"Device: %s\nLTK: %s, IRK: %s, ERand: %d, EDIV: %d\n",
 		d.Mac,
