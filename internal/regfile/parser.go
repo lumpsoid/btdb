@@ -1,4 +1,4 @@
-package parser
+package regfile
 
 import (
 	"bufio"
@@ -205,7 +205,7 @@ func traverseNestedMap(regData map[string]interface{}, header string) (map[strin
 	return current, true
 }
 
-func ParseRegFile(path string, header string) (map[string]interface{}, error) {
+func Parse(path string, header string) (map[string]interface{}, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
