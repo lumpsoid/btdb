@@ -1,12 +1,13 @@
 package parser
 
 import (
-	"btdb/internal/device"
+	"bufio"
+	"encoding/hex"
 	"fmt"
-	"log"
+	"os"
 	"reflect"
-
-	"golang.org/x/sys/windows/registry"
+	"strconv"
+	"strings"
 )
 
 func reverseSlice(slice interface{}) error {
@@ -33,116 +34,225 @@ func reverseSlice(slice interface{}) error {
 	return nil
 }
 
-func ParseTest() {
-	rPath := `SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Keys`
-	k, err := registry.OpenKey(registry.LOCAL_MACHINE, rPath, registry.READ)
+func decodeDword(value string) (int64, error) {
+	hexString := strings.TrimPrefix(value, "dword:")
+	intValue, err := strconv.ParseInt(hexString, 16, 64)
 	if err != nil {
-		log.Fatal(err)
+		return 0, err
 	}
-	defer k.Close()
-
-	names, err := k.ReadSubKeyNames(-1)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("Names: ", names)
+	return intValue, nil
 }
 
-func ListDevicesMac() {
-	rPath := `SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Keys`
-	k, err := registry.OpenKey(registry.LOCAL_MACHINE, rPath, registry.READ)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer k.Close()
+func decodeHex(value string) ([]byte, error) {
+	// Split the hex string by commas
+	hexString := strings.Split(value, ":")[1]
+	hexParts := strings.Split(hexString, ",")
 
-	btInterfaces, err := k.ReadSubKeyNames(-1)
-	if err != nil {
-		log.Fatal(err)
-	}
-	for _, i := range btInterfaces {
-		rDevicePath := rPath + `\` + i
-		kD, err := registry.OpenKey(registry.LOCAL_MACHINE, rDevicePath, registry.READ)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer kD.Close()
+	// Initialize a byte slice to store the converted bytes
+	byteSlice := make([]byte, len(hexParts))
 
-		btMacs, err := kD.ReadValueNames(-1)
+	// Convert each hex string to byte
+	for i, hexPart := range hexParts {
+		// Parse hex string to byte
+		hexBytes, err := hex.DecodeString(hexPart)
 		if err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
-		btSubMacs, err := kD.ReadSubKeyNames(-1)
+
+		// Ensure we have exactly one byte per hex string part
+		if len(hexBytes) != 1 {
+			return nil, fmt.Errorf("unexpected length after decoding hex string: %v", hexBytes)
+		}
+
+		// Store the byte in the byte slice
+		byteSlice[i] = hexBytes[0]
+	}
+	return byteSlice, nil
+}
+
+func parseValue(value string) (interface{}, error) {
+	switch {
+	case strings.HasPrefix(value, "dword:"):
+		intValue, err := decodeDword(value)
 		if err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
-		fmt.Println("BT Devices: ", btMacs, btSubMacs)
+		return intValue, nil
+	case strings.HasPrefix(value, "hex"):
+		intValue, err := decodeHex(value)
+		if err != nil {
+			return nil, err
+		}
+		return intValue, nil
+	default:
+		// return "", fmt.Errorf("unsupported value: %s", value)
+		return value, nil
 	}
 }
 
-func ParseDevices() {
-	rPath := `SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Keys`
-	k, err := registry.OpenKey(registry.LOCAL_MACHINE, rPath, registry.READ)
+func stripQuotes(value string) string {
+	if len(value) > 1 && value[0] == '"' && value[len(value)-1] == '"' {
+		return value[1 : len(value)-1]
+	}
+	return value
+}
+
+func parseRegLine(line string) (lineType string, key string, value interface{}, err error) {
+	line = strings.TrimSpace(line)
+	if len(line) == 0 {
+		return "empty", "", "", nil // skip empty lines or comments
+	}
+
+	// Extract section headers
+	if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+		key = line[1 : len(line)-1]
+		return "header", key, "", nil
+	}
+
+	// Extract key-value pairs
+	parts := strings.SplitN(line, "=", 2)
+	if len(parts) != 2 {
+		return "error", "", "", fmt.Errorf("invalid line format: %s", line)
+	}
+	key = strings.TrimSpace(parts[0])
+	valuePre := strings.TrimSpace(parts[1])
+
+	// Strip surrounding quotes from value
+	key = stripQuotes(key)
+	valuePre = stripQuotes(valuePre)
+
+	parsedValue, err := parseValue(valuePre)
 	if err != nil {
-		log.Fatal(err)
+		return "error", "", "", err
 	}
-	defer k.Close()
 
-	btInterfaces, err := k.ReadSubKeyNames(-1)
+	return "pair", key, parsedValue, nil
+}
+
+func getRegistryVersion(scanner *bufio.Scanner) (string, error) {
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "Windows Registry Editor Version") {
+			lineSplited := strings.Split(line, " ")
+			return lineSplited[len(lineSplited)-1], nil
+		}
+	}
+	return "", fmt.Errorf("registry version not found")
+}
+
+func checkRegistryVersion(ver string) (bool, error) {
+	if ver != "5.00" {
+		return false, fmt.Errorf("unsupported registry version: %s", ver)
+	}
+	return true, nil
+}
+
+func insertKey(
+	lineType string,
+	regData map[string]interface{},
+	key string,
+	value interface{},
+) map[string]interface{} {
+	currentMap := regData
+	if lineType == "header" {
+		keySlice := strings.Split(key, "\\")
+		for _, key := range keySlice {
+			_, ok := currentMap[key]
+			if ok {
+				currentMap = currentMap[key].(map[string]interface{})
+			} else {
+				if key != "" {
+					currentMap[key] = make(map[string]interface{})
+					currentMap = currentMap[key].(map[string]interface{})
+				}
+			}
+		}
+		return currentMap
+	}
+	if key != "" {
+		currentMap[key] = value
+	}
+	return currentMap
+}
+
+func initDict(key string) map[string]interface{} {
+	dictReg := make(map[string]interface{})
+	currentDict := dictReg
+	keySlice := strings.Split(key, "\\")
+	for _, key := range keySlice {
+		if _, ok := dictReg[key]; !ok {
+			currentDict[key] = make(map[string]interface{})
+			currentDict = currentDict[key].(map[string]interface{})
+		}
+	}
+	return dictReg
+}
+
+func traverseNestedMap(regData map[string]interface{}, header string) (map[string]interface{}, bool) {
+	keys := strings.Split(header, "\\")
+	current := regData
+
+	for _, key := range keys {
+		value, ok := current[key]
+		if !ok {
+			return nil, false // Key not found
+		}
+		if nested, isMap := value.(map[string]interface{}); isMap {
+			current = nested
+		}
+	}
+
+	return current, true
+}
+
+func ParseRegFile(path string, header string) (map[string]interface{}, error) {
+	file, err := os.Open(path)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
-	for _, i := range btInterfaces {
-		fmt.Println("Device: ", i)
-		rDevicePath := rPath + `\` + i
-		kD, err := registry.OpenKey(registry.LOCAL_MACHINE, rDevicePath, registry.READ)
-		if err != nil {
-			log.Fatal(err)
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	ver, err := getRegistryVersion(scanner)
+	if err != nil {
+		return nil, err
+	}
+	ok, err := checkRegistryVersion(ver)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, err
+	}
+
+	regData := make(map[string]interface{})
+	currentDict := regData
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Trim(line, " ") == "" {
+			continue
 		}
-		defer kD.Close()
 
-		btMacs, err := kD.ReadSubKeyNames(-1)
+		lineType, key, value, err := parseRegLine(line)
 		if err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
-		for _, m := range btMacs {
-			fmt.Println("Mac: ", m)
-			rMacPath := rDevicePath + `\` + m
-			kM, err := registry.OpenKey(registry.LOCAL_MACHINE, rMacPath, registry.READ)
-			if err != nil {
-				log.Fatal(err)
-			}
-			defer kM.Close()
-
-			macValueNames, err := kM.ReadValueNames(-1)
-			if err != nil {
-				log.Fatal(err)
-			}
-			fmt.Printf("Macs value names: %q\n", macValueNames)
-
-			ltk, _, err := kM.GetBinaryValue("LTK")
-			if err != nil {
-				log.Fatal(err)
-			}
-			irk, _, err := kM.GetBinaryValue("IRK")
-			if err != nil {
-				log.Fatal(err)
-			}
-			err = reverseSlice(irk)
-			if err != nil {
-				log.Fatal(err)
-			}
-			eRand, _, err := kM.GetIntegerValue("ERand")
-			if err != nil {
-				log.Fatal(err)
-			}
-			ediv, _, err := kM.GetIntegerValue("EDIV")
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			btDevice := device.New(m, ltk, irk, eRand, ediv)
-			fmt.Printf("Device info: %s\n", btDevice)
+		if lineType == "header" {
+			currentDict = insertKey(lineType, regData, key, value)
+		} else {
+			currentDict = insertKey(lineType, currentDict, key, value)
 		}
 	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	regDataReturn, found := traverseNestedMap(regData, header)
+	if !found {
+		return nil, fmt.Errorf("path not found in traversing: %s", header)
+	}
+
+	return regDataReturn, nil
 }
