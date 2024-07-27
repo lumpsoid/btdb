@@ -30,6 +30,10 @@ func main() {
 
 	flag.Parse()
 
+  if mountpoint == "" {
+		log.Fatal("-mnt parameter is empty. mount windows partition and retry")
+  }
+
 	prefix := "GOREGPARSE"
 	registryQueryExport := `ControlSet001\Services\BTHPORT\Parameters\Keys`
 	registryQuery := fmt.Sprint(prefix, `\ControlSet001\Services\BTHPORT\Parameters\Keys`)
