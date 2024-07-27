@@ -1,6 +1,9 @@
 package utility
 
-import "os/exec"
+import (
+	"os"
+	"os/exec"
+)
 
 func CheckProgramAvailability(program string) error {
 	// Run "which" command to check program availability
@@ -12,4 +15,22 @@ func CheckProgramAvailability(program string) error {
 	}
 
 	return nil // Program found
+}
+
+func FileExists(filePath string) bool {
+	// Use os.Stat to get file info
+	_, err := os.Stat(filePath)
+
+	// Check if there was no error (file exists)
+	if err == nil {
+		return true
+	}
+
+	// Check if the error indicates that the file doesn't exist
+	if os.IsNotExist(err) {
+		return false
+	}
+
+	// For any other error, assume the file exists (to be safe)
+	return true
 }
